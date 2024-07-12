@@ -1,0 +1,23 @@
+// Para el analisis de pencahue por laderas y altitudes se creo un shp Personalizado, reemplazar "bosque_analito" en script base con lo siguiente
+bosque_analito= ee.FeatureCollection(projects/ee-aarongonzalez4/assets/Pendientes_alturas_bosques_Pencahue)
+
+// Las diferentes condiciones para los graficos y series de ttiempk se encuentran a continuación
+var norte_200= bosque_analito.filter(ee.Filter.eq("Exposicion","Norte")).filter(ee.Filter.eq("Alt","0-200")).geometry()
+var sur_200= bosque_analito.filter(ee.Filter.eq("Exposicion","Sur")).filter(ee.Filter.eq("Alt","0-200")).geometry()
+var este_200= bosque_analito.filter(ee.Filter.eq("Exposicion","Este")).filter(ee.Filter.eq("Alt","0-200")).geometry()
+var oeste_200= bosque_analito.filter(ee.Filter.eq("Exposicion","Oeste")).filter(ee.Filter.eq("Alt","0-200")).geometry()
+
+var norte_400= bosque_analito.filter(ee.Filter.eq("Exposicion","Norte")).filter(ee.Filter.eq("Alt","200-400")).geometry()
+var sur_400= bosque_analito.filter(ee.Filter.eq("Exposicion","Sur")).filter(ee.Filter.eq("Alt","200-400")).geometry()
+var este_400= bosque_analito.filter(ee.Filter.eq("Exposicion","Este")).filter(ee.Filter.eq("Alt","200-400")).geometry()
+var oeste_400= bosque_analito.filter(ee.Filter.eq("Exposicion","Oeste")).filter(ee.Filter.eq("Alt","200-400")).geometry()
+
+var norte_600= bosque_analito.filter(ee.Filter.eq("Exposicion","Norte")).filter(ee.Filter.eq("Alt","400-600")).geometry()
+var sur_600= bosque_analito.filter(ee.Filter.eq("Exposicion","Sur")).filter(ee.Filter.eq("Alt","400-600")).geometry()
+var este_600= bosque_analito.filter(ee.Filter.eq("Exposicion","Este")).filter(ee.Filter.eq("Alt","400-600")).geometry()
+var oeste_600= bosque_analito.filter(ee.Filter.eq("Exposicion","Oeste")).filter(ee.Filter.eq("Alt","400-600")).geometry()
+
+var norte_600_ = bosque_analito.filter(ee.Filter.eq("Exposicion","Norte")).filter(ee.Filter.eq("Alt","600+")).geometry()
+var sur_600_ = bosque_analito.filter(ee.Filter.eq("Exposicion","Sur")).filter(ee.Filter.eq("Alt","600+")).geometry()
+var este_600_ = bosque_analito.filter(ee.Filter.eq("Exposicion","Este")).filter(ee.Filter.eq("Alt","600+")).geometry()
+var oeste_600_ = bosque_analito.filter(ee.Filter.eq("Exposicion","Oeste")).filter(ee.Filter.eq("Alt","600+")).geometry()
