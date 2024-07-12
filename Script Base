@@ -1,0 +1,413 @@
+ var landsat8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2"),
+    landsat9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2"),
+    sentinel = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED"),
+    comunas = projects/ee-aarongonzalez4/assets/Comunas,
+    table5 = projects/ee-aarongonzalez4/assets/07_regi_n_del_maule_actualizaci_n_2016
+
+///////////////////////////////////////////
+////// Geometrias y proyecciones //////////
+///////////////////////////////////////////
+
+//Área de estudio (espacio donde se encuentra el bosque. ej. Comuna, region, poligono, etc)
+var analito= comunas.filter(ee.Filter.eq("Comuna","Pencahue"))
+
+///FeatureCollection (shp) con los poligonos de vegetación a analizar, este tiene que estar contenido dentro de analito
+var bosque_analito=table5.filterBounds(analito).filter(ee.Filter.eq("SUBUSO","Bosque Nativo"))
+//Mostramos en consola la proyección para corroborar
+print(bosque_analito.geometry().projection())
+
+//Centramos el mapa en la region de estudio y agregamos los poligonos previamente definidos para visualizar en el mapa
+Map.centerObject(analito, 12)
+Map.addLayer(analito,{color:"black"},"Region Analito")
+Map.addLayer(bosque_analito,{color:"green"},"Bosque Analito")
+
+
+///////////////////////////////////////////
+//////////// Armando herramientas: ////////
+////// Funciones y parametros previos /////
+///////////////////////////////////////////
+
+//Función para exportar Datos
+function exportar(image, fileName) {
+  // Parámetros para la exportación
+  var params = {
+    image: image,
+    description: fileName,
+    folder: 'Propuestas',
+    fileNamePrefix: fileName,
+    region: analito,
+    scale: 10,
+    maxPixels: 1e13
+  }
+  // Exportar la imagen
+  Export.image.toDrive(params);
+}
+
+//Función Mascara de Nubes para Landsat (obtenido de Harmonized Sentinel-2 MSI: MultiSpectral Instrument, Level-2A )
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+
+  // Los bits 10 y 11 son nubes y cirros.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  var uso_suelo= image.select("SCL").rename("uso_suelo")
+
+  return image.updateMask(mask).divide(10000).copyProperties(image).set("system:time_start", (image.get("system:time_start")))
+          
+}
+
+//Funcion que enmascara pixeles para Landsat 8 y 9 (Creado en base a la banda QA_PIXEL de calidad de los productos LANDSAT )
+var mascara_nubes_landsat = function(imagen) {
+  var qa = imagen.select("QA_PIXEL");
+  var mask = qa.bitwiseAnd(1 << 1).eq(0)
+    .and(qa.bitwiseAnd(1 << 2).eq(0))
+    .and(qa.bitwiseAnd(1 << 3).eq(0))
+    .and(qa.bitwiseAnd(1 << 4).eq(0))
+
+    .and(qa.bitwiseAnd(1 << 5).eq(0));
+  var saturacion= imagen.select("QA_RADSAT").eq(0)
+
+  return imagen.updateMask(mask).updateMask(saturacion);
+
+};
+
+
+var CLOUD_TRESH=7 //Limite de porcentaje de nubosidad tolerable (se aplica en la función a continuación)
+//Funcion que filtra colecciones landsat por distintas propiedades
+var filtrar_coleccion = function(coleccion) {
+    var coleccion_filtrada = coleccion.filterDate("2000","2025")
+        .filterBounds(analito)
+        .filter(ee.Filter.lte("CLOUD_COVER", CLOUD_TRESH)) // cobertura de nubes
+        .filter(ee.Filter.lte("CLOUD_COVER_LAND",CLOUD_TRESH)) //cobertura de nubes baja
+        //.filter(ee.Filter.gte("SUN_ELEVATION",5)) //imagenes de dia
+        .filter(ee.Filter.or(ee.Filter.eq("IMAGE_QUALITY",9), //calidad de imagen para ETM
+        ee.Filter.eq("IMAGE_QUALITY_OLI",9))) //calidad de imagen para Oli
+        .map(mascara_nubes_landsat)
+    return coleccion_filtrada
+}
+
+// Función para obtener y cambiar el nombre de bandas de interés de OLI. (L8-L9)
+function renameOli(img) {
+  return img.select(
+      ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'ST_B10'],
+      ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2', 'termal']);
+}
+
+//Función para renombrar bandas sentinel2
+function renameCop(img){
+  return img.select(
+    ["B2","B3","B4","B8","B11","B12","SCL"],
+    ['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2',"SCL"])  
+}
+
+
+/////Funciones que calculan y añaden bandas de indices espectrales
+///// se pueden agregar mas
+
+// Función para agregar el NDVI como banda
+function addNdvi(imagen) {
+  var calculo_ndvi= imagen.normalizedDifference(["NIR","Red"])
+  var salida = imagen.addBands(calculo_ndvi.rename("NDVI"))
+  return salida
+}
+//Función para agregar NBRI como banda
+function addNBRI (imagen) {
+  var calculo_nbri= imagen.normalizedDifference(["NIR","SWIR2"])
+  var salida= imagen.addBands(calculo_nbri.rename("NBRI"))
+  return salida
+}
+
+//Funcion para agregar NDMI como banda
+function addNDMI (imagen){
+  var calculo_ndmi= imagen.normalizedDifference(["NIR","SWIR1"])
+  var salida= imagen.addBands(calculo_ndmi.rename("NDMI"))
+  return salida
+}
+
+// Función para calcular EVI
+function addEVI(image) {
+  var evi = image.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+      'NIR': image.select('NIR'),
+      'RED': image.select('Red'),
+      'BLUE': image.select('Blue')
+    }).rename('EVI');
+  return image.addBands(evi);
+}
+
+function addfAPARn(image){
+  var fAPAR = image.select('NDVI').multiply(1.24).subtract(0.04).rename('fAPARn');
+  return image.addBands(fAPAR);
+}
+
+function addfAPARe(image) {
+  var fAPAR = image.select('EVI').multiply(1.24).subtract(0.04).rename('fAPARe');
+  return image.addBands(fAPAR);
+}
+
+// Función para calcular GPP con EVI
+function calculateGPPe(image) {
+  var LUE = ee.Image.constant(1.2); // Valor promedio de LUE en g C/MJ basado en Reichstein et al. (2003)
+  var PAR = ee.Image.constant(4.6); // Radiación Fotosintéticamente Activa en MJ/m²/día (valor constante)
+  
+  var GPP = image.select('fAPARe').multiply(PAR).multiply(LUE).rename('GPPe');
+  return image.addBands(GPP);
+}
+// Función para calcular GPPcon NDVI
+function calculateGPPn(image) {
+  var LUE = ee.Image.constant(1.2); // Valor promedio de LUE en g C/MJ basado en Reichstein et al. (2003)
+  var PAR = ee.Image.constant(4.6); // Radiación Fotosintéticamente Activa en MJ/m²/día (valor constante)
+  
+  var GPP = image.select('fAPARn').multiply(PAR).multiply(LUE).rename('GPPn');
+  return image.addBands(GPP);
+}
+
+//Funcion para transformar a reflectancia los DN alamcenados por pixel para satelites landsat
+var correccion_escala= function applyScaleFactors(image) {
+  var opticalBands = image.select(['Blue', 'Green', 'Red', 'NIR', 'SWIR1', 'SWIR2']).multiply(0.0000275).add(-0.2);
+  var thermalBand = image.select('termal').multiply(0.00341802).add(149.0); //Conversión Banda térmica a °c
+  return image.addBands(opticalBands.toFloat(), null, true)
+              .addBands(thermalBand.rename("termal").subtract(273.15), null, true)
+};
+
+
+//Parametros de visualizacion RGB Landsat 
+var vis_params_rgb= {
+  bands: ["Red","Green","Blue"],
+  min: 0,
+  max: 0.3,
+  gamma: 1.1
+};
+
+// parametros visualizacion NDVI
+var vis_params_ndvi= {
+  min: 0.1,
+  max: 1,
+  palette: ["red","yellow","green"]
+};
+
+// parametros visualizacion EVI
+var vis_params_evi= {
+  min: 0,
+  max: 1,
+  palette: [
+  'FFFFFF', 'CE7E45', 'DF923D', 'F1B555', 'FCD163', '99B718', '74A901', 
+  '66A000', '529400', '3E8601', '207401', '056201', '004C00', '023B01', 
+  '012E01', '011D01']
+};
+
+//parametrso visualizacion NDMI
+var vis_params_ndmi= {
+  min: -0.8,
+  max: 0.8,
+  palette: [
+    'red',     // Muy baja humedad
+    'orange',  // Baja humedad
+    'yellow',  // Moderada humedad
+    'green',   // Alta humedad
+    'cyan',    // Muy alta humedad
+    'blue'     // Extremadamente alta humedad
+  ]
+};
+
+// Funcion para obtener las fechas en formato legible (yy-mm-dd) y agregarla como propiedad de nombre "Fecha"
+var fechas= function (imagen){
+  var fechas= ee.Date(imagen.get("system:time_start")).format('yyyy-MM-dd')
+  return imagen.set("FECHA",fechas)
+}
+
+/////////////////////////////////////////////////////////////
+////// Apartado del llamado y filtrado de colecciones////////
+////////////////////////////////////////////////////////////
+
+//Función para filtrar por propiedaddes y agregar bandas de indices espectrales a una ImageCollection de Sentinel2
+// en caso de ser requerida
+var analito_sentinel= sentinel
+                  .filterBounds(analito)
+                  // Pre-filter to get less cloudy granules.
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',CLOUD_TRESH))
+                  .filter(ee.Filter.eq("RADIOMETRIC_QUALITY","PASSED"))
+                  .filter(ee.Filter.eq("SENSING_ORBIT_DIRECTION","DESCENDING"))
+                  .map(maskS2clouds)
+                  .map(renameCop)
+                  .map(addNdvi)
+                  .map(addEVI)
+                  .map(addNDMI)
+                  .map(fechas)
+                  .sort("system:time_start")
+
+//Aplicamos los filtros y corrección de escala a las colecciones Landsat 8 y 9
+var l8= filtrar_coleccion(landsat8).map(renameOli).map(correccion_escala).map(addNdvi).map(addEVI).map(addNDMI)
+var l9= filtrar_coleccion(landsat9).map(renameOli).map(correccion_escala).map(addNdvi).map(addEVI).map(addNDMI)
+//Unimos ambas colecciones mediante la funcion .merge() y ordenamos las imagenes por fecha.
+var analito_landsat= l8.merge(l9).map(fechas).sort("system:time_start",true)
+//Visualizamos la coleccion resultante en Consola
+print(analito_landsat, "Coleccion Landsat")
+
+//Función que extrae las fechas de cada imagen y la retorna como lista. 
+var getDates = function(collection) {
+  return collection.aggregate_array('system:time_start')
+                  .map(function(date) {
+                    return ee.Date(date).format('YYYY-MM-dd');
+                  });
+};
+// Ejecuta la función y obtiene las fechas
+var dates = getDates(analito_landsat);
+print('Fechas:', dates);
+
+////////////////////////////////////////////////////
+///// Sección de las funciones de calculo //////////
+/////Y reduccion de pixeles por geometrias ///////
+////////////////////////////////////////////////////
+
+//Funcion que reduce las imagenes de la coleccion mediante el metodo .mean() sobre una region y bandas especificada, 
+// agrega el valor calculado como propiedad con un nombre dado
+var NDVI_temp_properties = function(coleccion, analito, banda, escala, nombre_banda) {
+  var reductor = function(imagen) {
+    var mean = imagen.select(banda).reduceRegion({
+      reducer: ee.Reducer.mean(),
+      geometry: analito,
+      scale: escala,
+      bestEffort: true
+    });
+    var out = mean.get(banda);
+    return imagen.set(nombre_banda, out);
+  };
+  var salida = coleccion.map(reductor);
+  return salida;
+};
+//Funcion que plotea bandas de NDVI en funcion a la fecha (system:time_start)
+// Esta función calcula el valor reducido de pixeles por media que caen dentro de un poligono dado como entrada
+// una vez calculado el valor este se almacena como propiedad dentro de la colección con un nombre tambien dado como entrada
+// La función primeramente clipea la imagen usando como mascara el bosque analito, para despues calcular el valor total de pixeles usando "analito"
+var test_temp_properties = function(coleccion, analito,clipr, banda, escala, nombre_banda) {
+  var reductor = function(imagen) {
+    var mean = imagen.clip(clipr).select(banda).reduceRegion({ //Primero clipeamos la banda antes de calcular
+    // para reducir memoria
+      reducer: ee.Reducer.mean(),
+      geometry: analito,
+      scale: escala,
+      bestEffort: true
+    });
+    var out = mean.get(banda);
+    return imagen.set(nombre_banda, out);
+  };
+  var salida = coleccion.map(reductor);
+  return salida;
+};
+//Funcion que plotea bandas (dadas por entrada) en funcion a la fecha (system:time_start) 
+var chart_properties_ndvi = function(coleccion, color, propiedades,eje, titulo) {
+  var chart_ndvi = ui.Chart.feature.byFeature({
+    features: coleccion,
+    xProperty: 'monthYear',  
+    yProperties: propiedades
+  }).setOptions({
+    title: titulo,
+    vAxis: {title: eje, viewWindow: {min: -1, max: 1}},
+    hAxis: {
+      title: 'Mes-Año',
+      gridlines: {count: 12}
+    },
+    series: {0: {color: color}, 1: {color: "orange"}, 2: {color: "blue"}},
+    pointSize: 1
+  });
+  return chart_ndvi;
+};
+
+//Función que recorta imagenes en base a la región de estudio, esto reduce el tamaño de las imagenes solo al necesario
+function clipToRegion(image) {
+  return image.clip(analito);
+}
+var analito_landsat= analito_landsat.map(clipToRegion)
+var analito_sentinel= analito_sentinel.map(clipToRegion)
+print(analito_landsat, "Anlito Landsat")
+print(analito_sentinel, "Analito Sentinel")
+
+// Función para calcular la media mensual por año con manejo de meses sin imágenes
+function calculateMonthlyMeansByYear(collection) {
+  // Define los meses
+  var months = ee.List.sequence(1, 12);
+
+  // Obtén los años de la colección
+  var years = ee.List(collection.aggregate_array('system:time_start'))
+               .map(function(date) {
+                 return ee.Date(date).get('year');
+               })
+               .distinct();
+
+  // Crea una imagen por defecto con la banda NDVI y valor cero
+  var defaultImage = ee.Image().set('month', 0)
+                              .set('year', 0)
+                              .set('system:time_start', ee.Date('1970-01-01').millis())
+                              .set('monthYear', ee.Date('1970-01-01').format('MM-YYYY'))
+                              .set("value",0)
+                              .addBands(ee.Image.constant(0).rename('NDVI'));
+
+  // Itera sobre cada año y cada mes para calcular las medias
+  var monthlyMeans = years.map(function(year) {
+    year = ee.Number(year);
+    return months.map(function(month) {
+      month = ee.Number(month);
+      var startDate = ee.Date.fromYMD(year, month, 1);
+      var endDate = startDate.advance(1, 'month');
+
+      var monthlyCollection = collection.filterDate(startDate, endDate)
+                                         .filter(ee.Filter.listContains('system:band_names', 'NDVI'))
+                                         .map(clipToRegion);
+
+      // Manejo de meses sin imágenes
+      var meanImage = ee.Algorithms.If(
+        monthlyCollection.size().gt(0),
+        monthlyCollection.mean().set('month', month)
+                                .set('year', year)
+                                .set('system:time_start', startDate.millis())
+                                .set("value",1)
+                                .set('monthYear', startDate.format('MM-YYYY')),
+        defaultImage.set('month', month)
+                    .set('year', year)
+                    .set('system:time_start', startDate.millis())
+                    .set('monthYear', startDate.format('MM-YYYY'))
+      );
+
+      return meanImage;
+    });
+  }).flatten();
+
+  return ee.ImageCollection.fromImages(monthlyMeans);
+}
+
+
+//Calculamos las medias estacionales por año
+var analito_sentinel= analito_sentinel.filterDate("2021","2025").select(["NDVI","EVI","NDMI"])
+var seasonalMeansByYear = calculateMonthlyMeansByYear(analito_landsat).filter(ee.Filter.eq("value",1));
+seasonalMeansByYear= seasonalMeansByYear.map(addfAPARe).map(calculateGPPe)
+
+print(seasonalMeansByYear, "Medias mensuales por año")
+
+
+
+function mapeador(coleccion){
+  var nap= Map.addLayer(coleccion.select("EVI"), vis_params_evi, "EVI");
+      Map.addLayer(coleccion.select("NDVI"), vis_params_ndvi, "NDVI")
+      Map.addLayer(coleccion.select("NDMI"), vis_params_ndmi, "NDMI ")
+// Visualizar GPP (opcional)
+    //  Map.addLayer(coleccion.select('GPPe'), {min: 0, max: 5, palette: ['white', 'green']}, 'GPP'); 
+//(g C/m²/día).
+  return nap
+}
+
+
+mapeador(seasonalMeansByYear.mean())
+
+// Calcular propiedades temporales de EVI, NDVI y NDMI
+var evi = test_temp_properties(seasonalMeansByYear, analito, bosque_analito, "EVI", 30, "EVI");
+evi = test_temp_properties(evi, analito, bosque_analito, "NDVI", 10, "NDVI");
+evi = test_temp_properties(evi, analito, bosque_analito, "NDMI", 10, "NDMI");
+
+print(chart_properties_ndvi(evi, "green", ["NDVI", "EVI", "NDMI"], "Valor Indice", "NDVI y EVI para Bosques Nativos"));
+
+//exportar(seasonalMeansByYear.reduce(ee.Reducer.stdDev()).select("NDVI_stdDev"),"Desviacion_estandar_NDVI_Pencahue")
